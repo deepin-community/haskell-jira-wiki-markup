@@ -1,6 +1,7 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 {-|
 Module      : Text.Jira.PrinterTests
-Copyright   : © 2019–2020 Albert Krewinkel
+Copyright   : © 2019–2021 Albert Krewinkel
 License     : MIT
 
 Maintainer  : Albert Krewinkel <tarleb@zeitkraut.de>
@@ -12,7 +13,8 @@ Tests for the jira wiki printer.
 module Text.Jira.PrinterTests (tests) where
 
 import Prelude hiding (unlines)
-import Data.Text (Text, unlines)
+import Data.String (IsString (fromString))
+import Data.Text (Text, pack, unlines)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
 import Text.Jira.Markup
@@ -106,6 +108,32 @@ tests = testGroup "Printer"
       let list = List Enumeration [[Para [Str "boring"]]]
           para = Para [Str "after", Space, Str "table"]
       in prettyBlocks [list, para] @?= "# boring\n\nafter table\n"
+
+    , testGroup "block quote"
+      [ testCase "single-line block quote" $
+        let bq = BlockQuote [Para
+                   [Str "Errare", Space, Str "humanum", Space, Str "est."]
+                 ]
+        in prettyBlocks [bq] @?= "bq. Errare humanum est."
+
+      , testCase "multi-line block quote" $
+        let bq = BlockQuote [Para [Str "Show", Linebreak, Str "me"]]
+        in prettyBlocks [bq] @?= "{quote}\nShow\nme\n{quote}"
+
+      , testCase "multi-paragraph block quote" $
+        let bq = BlockQuote [Para [Str "Only."], Para [Str "You."]]
+        in prettyBlocks [bq] @?= "{quote}\nOnly.\n\nYou.\n{quote}"
+      ]
+
+    , testGroup "panel"
+      [ testCase "simple panel" $
+        let panel = Panel [] [Para [Str "Contents!"]]
+        in prettyBlocks [panel] @?= "{panel}\nContents!\n{panel}"
+
+      , testCase "panel with title" $
+        let panel = Panel [Parameter "title" "Gimme"] [Para [Str "Contents!"]]
+        in prettyBlocks [panel] @?= "{panel:title=Gimme}\nContents!\n{panel}"
+      ]
     ]
 
   , testGroup "isolated inline"
@@ -116,8 +144,57 @@ tests = testGroup "Printer"
       renderInline (AutoLink (URL "https://example.org")) @?=
       "https://example.org"
 
+    , testCase "citation" $
+      renderInline (Citation [Str "John", Space, Str "Doe"]) @?=
+      "??John Doe??"
+
     , testCase "Emoji" $
       renderInline (Emoji IconSmiling) @?= ":D"
+
+    , testCase "thumbnail" $
+      renderInline (Image [Parameter "thumbnail" ""] (URL "example.jpg")) @?=
+      "!example.jpg|thumbnail!"
+
+    , testCase "image attributes" $
+      let params = [Parameter "align" "right", Parameter "vspace" "4"]
+      in renderInline (Image params (URL "example.jpg")) @?=
+         "!example.jpg|align=right, vspace=4!"
+
+    , testGroup "link"
+      [ testCase "external link" $
+        renderInline (Link External [Str "example"] "https://example.org") @?=
+        "[example|https://example.org]"
+
+      , testCase "email link" $
+        renderInline (Link Email [Str "example"] "me@example.org") @?=
+        "[example|mailto:me@example.org]"
+
+      , testCase "attachment" $
+        renderInline (Link Attachment [Str "a", Space, Str "b"] "test.txt") @?=
+        "[a b^test.txt]"
+
+      , testCase "attachment without description" $
+        renderInline (Link Attachment [] "something.txt") @?=
+        "[^something.txt]"
+
+      , testCase "attachment with space and Unicode" $
+        renderInline (Link Attachment [] "Übergang links.txt") @?=
+        "[^Übergang links.txt]"
+
+      , testCase "user" $
+        renderInline (Link User [Str "John", Space, Str "Doe"] "ab34-cdef") @?=
+        "[John Doe|~ab34-cdef]"
+
+      , testCase "smart link" $
+        renderInline (Link SmartLink [Str "repo"]
+                      "https://github.com/tarleb/jira-wiki-markup") @?=
+        "[repo|https://github.com/tarleb/jira-wiki-markup|smart-link]"
+
+      , testCase "smart card" $
+        renderInline (Link SmartCard [Str "hslua"]
+                      "https://github.com/hslua/hslua") @?=
+        "[hslua|https://github.com/hslua/hslua|smart-card]"
+      ]
 
     , testCase "Styled Emphasis" $
       renderInline (Styled Emphasis [Str "Hello,", Space, Str "World!"]) @?=
@@ -134,7 +211,11 @@ tests = testGroup "Printer"
     ]
 
   , testGroup "combined inlines"
-    [ testCase "special char between words" $
+    [ testCase "opening brace between words" $
+      prettyInlines [Str "a", SpecialChar '{', Str "b"] @?=
+      "a\\{b"
+
+    , testCase "other special char between words" $
       prettyInlines [Str "easy", SpecialChar '-', Str "peasy"] @?=
       "easy-peasy"
 
@@ -163,12 +244,29 @@ tests = testGroup "Printer"
       prettyInlines [SpecialChar ':', Space, Str "end"] @?=
       ": end"
 
+    , testCase "closing brace between spaces" $
+      prettyInlines [Space, SpecialChar '}', Space] @?=
+      " \\} "
+
     , testCase "colon not escaped before opening paren" $
       -- escaping the paren is enough
       prettyInlines [SpecialChar ':', SpecialChar '('] @?=
       ":\\("
+
+    , testGroup "question marks"
+      [ testCase "escaped if followed by question mark" $
+        prettyInlines [SpecialChar '?', SpecialChar '?'] @?=
+        "\\??"
+
+      , testCase "unescaped before space" $
+        prettyInlines [SpecialChar '?', Space, Str "foo"] @?=
+        "? foo"
+      ]
     ]
   ]
 
 renderBlock' :: Block -> Text
 renderBlock' = withDefault . renderBlock
+
+instance IsString URL where
+  fromString = URL . pack
