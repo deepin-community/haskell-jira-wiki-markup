@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-|
 Module      : Text.Jira.Parser
-Copyright   : © 2019–2020 Albert Krewinkel
+Copyright   : © 2019–2021 Albert Krewinkel
 License     : MIT
 
 Maintainer  : Albert Krewinkel <tarleb@zeitkraut.de>
@@ -50,11 +50,13 @@ prettyInlines = \case
     renderInline s <> renderStyledSafely style inlns <> prettyInlines rest
   Styled style inlns : s@(Str t) : rest | startsWithAlphaNum t ->
     renderStyledSafely style inlns <> renderInline s <> prettyInlines rest
-  s@Str{} : SpecialChar c : rest@(Str {}:_) ->
+  -- Most special chars don't need escaping when surrounded by spaces or within
+  -- a word. Braces are the exception, they should always be escaped.
+  s@Str{} : SpecialChar c : rest@(Str {}:_) | not (isBrace c) ->
     (renderInline s `T.snoc` c) <> prettyInlines rest
-  s@Space : SpecialChar c : rest@(Space {}:_) ->
+  s@Space : SpecialChar c : rest@(Space {}:_) | not (isBrace c) ->
     (renderInline s `T.snoc` c) <> prettyInlines rest
-  s@Linebreak : SpecialChar c : rest@(Space {}:_) ->
+  s@Linebreak : SpecialChar c : rest@(Space {}:_) | not (isBrace c) ->
     (renderInline s `T.snoc` c) <> prettyInlines rest
   -- Colon and semicolon only need escaping if they could otherwise
   -- become part of a smiley.
@@ -62,16 +64,28 @@ prettyInlines = \case
     T.singleton c <> prettyInlines rest
   [SpecialChar c] | c `elem` [':', ';'] ->
     T.singleton c
+  -- Questionmarks don't have to be escaped unless in groups of two
+  SpecialChar '?' : rest | not (startsWithQuestionMark rest) ->
+    "?" <> prettyInlines rest
   (x:xs) ->
     renderInline x <> prettyInlines xs
 
   where
+    isBrace = \case
+      '{' -> True
+      '}' -> True
+      _   -> False
+
     startsWithAlphaNum t = case T.uncons t of
       Just (c, _) -> isAlphaNum c
       _           -> False
     isSmileyStr = \case
       Str x | x `elem` ["D", ")", "(", "P"] -> True
       _                                     -> False
+
+    startsWithQuestionMark = \case
+      SpecialChar '?' : _ -> True
+      _                   -> False
 
 -- | Internal state used by the printer.
 data PrinterState = PrinterState
@@ -127,11 +141,12 @@ renderBlock = \case
                               , blks
                               , "{color}"
                               ]
-  BlockQuote [Para xs]     -> return $ "bq. " <> prettyInlines xs
+  BlockQuote [Para xs] | Linebreak `notElem` xs
+                           -> return $ "bq. " <> prettyInlines xs
   BlockQuote blocks        -> renderBlocks blocks >>= \blks -> return $ T.concat
                               [ "{quote}\n"
                               , blks
-                              , "\n{quote}"]
+                              , "{quote}"]
   Header lvl inlines       -> return $ T.concat
                               [ "h",  T.pack (show lvl), ". "
                               , prettyInlines inlines
@@ -221,17 +236,15 @@ listItemToJira items = do
 renderInline :: Inline -> Text
 renderInline = \case
   Anchor name            -> "{anchor:" <> name <> "}"
-  AutoLink url           -> urlText url
+  AutoLink url           -> fromURL url
+  Citation ils           -> "??" <> prettyInlines ils <> "??"
   ColorInline color ils  -> "{color:" <> colorText color <> "}" <>
                             prettyInlines ils <> "{color}"
   Emoji icon             -> iconText icon
   Entity entity          -> "&" <> entity <> ";"
-  Image params url       -> "!" <> urlText url <>
-                            if null params
-                            then "!"
-                            else "|" <> renderParams params <> "!"
+  Image ps url           -> "!" <> fromURL url <> renderImageParams ps <> "!"
   Linebreak              -> "\n"
-  Link inlines (URL url) -> "[" <> prettyInlines inlines <> "|" <> url <> "]"
+  Link lt ils url        -> renderLink lt ils url
   Monospaced inlines     -> "{{" <> prettyInlines inlines <> "}}"
   Space                  -> " "
   SpecialChar c          -> case c of
@@ -246,6 +259,21 @@ renderStyledSafely style =
   let delim = T.pack ['{', delimiterChar style, '}']
   in (delim <>) . (<> delim) . prettyInlines
 
+renderLink :: LinkType -> [Inline] -> URL -> Text
+renderLink linkType inlines url = case linkType of
+  Attachment -> "[" <> prettyInlines inlines <> "^" <> fromURL url <> "]"
+  Email      -> link' $ "mailto:" <> fromURL url
+  External   -> link' $ fromURL url
+  SmartCard  -> smartLink (fromURL url) "smart-card"
+  SmartLink  -> smartLink (fromURL url) "smart-link"
+  User       -> link' $ "~" <> fromURL url
+ where
+  link' urlText = case inlines of
+    [] -> "[" <> urlText <> "]"
+    _  -> "[" <> prettyInlines inlines <> "|" <> urlText <> "]"
+  smartLink urlText smartType =
+    "[" <> prettyInlines inlines <> "|" <> urlText <> "|" <> smartType <> "]"
+
 delimiterChar :: InlineStyle -> Char
 delimiterChar = \case
   Emphasis -> '_'
@@ -255,9 +283,12 @@ delimiterChar = \case
   Subscript -> '~'
   Superscript -> '^'
 
--- | Text rendering of an URL.
-urlText :: URL -> Text
-urlText (URL url) = url
+-- | Render image parameters (i.e., separate by comma).
+renderImageParams :: [Parameter] -> Text
+renderImageParams = \case
+  [] -> ""
+  ps | "thumbnail" `elem` map parameterKey ps -> "|thumbnail"
+  ps -> "|" <> T.intercalate ", " (map renderParam ps)
 
 renderWrapped :: Char -> [Inline] -> Text
 renderWrapped c = T.cons c . flip T.snoc c . prettyInlines

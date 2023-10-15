@@ -1,6 +1,6 @@
 {-|
 Module      : Text.Jira.Parser.Block
-Copyright   : © 2019–2020 Albert Krewinkel
+Copyright   : © 2019–2021 Albert Krewinkel
 License     : MIT
 
 Maintainer  : Albert Krewinkel <tarleb@zeitkraut.de>
@@ -30,6 +30,7 @@ import Data.Text (pack)
 import Text.Jira.Markup
 import Text.Jira.Parser.Core
 import Text.Jira.Parser.Inline
+import Text.Jira.Parser.Shared (colorName)
 import Text.Parsec
 
 -- | Parses any block element.
@@ -138,7 +139,7 @@ row = fmap Row . try $
 cell :: JiraParser Cell
 cell = try $ do
   mkCell <- cellStart
-  bs     <- many1 block
+  bs     <- many block
   return $ mkCell bs
 
 -- | Parses the beginning of a table cell and returns a function which
@@ -166,11 +167,13 @@ blockQuote :: JiraParser Block
 blockQuote = try $ singleLineBq <|> multiLineBq
   where
     singleLineBq = BlockQuote . (:[]) . Para <$>
-                   (string "bq. " *> skipMany (char ' ') *>
+                   (string "bq." *> skipMany (char ' ') *>
                     inline `manyTill` (void newline <|> eof))
     multiLineBq = BlockQuote <$>
-                  (string "{quote}" *> optional blankline *>
-                   block `manyTill` try (string "{quote}"))
+                  (string "{quote}"
+                   *> optional blankline
+                   *> skipMany (char ' ')
+                   *> block `manyTill` try (string "{quote}"))
 
 -- | Parses four consecutive hyphens as @'HorizontalRule'@.
 horizontalRule :: JiraParser Block
@@ -180,8 +183,9 @@ horizontalRule = HorizontalRule <$
 -- | Parses a preformatted text into a @NoFormat@ element.
 noformat :: JiraParser Block
 noformat = try $ do
-  (_, params) <- string "{noformat" *> parameters <* char '}' <* newline
-  content <- anyChar `manyTill` try (string "{noformat}" *> blankline)
+  (_, params) <- string "{noformat" *> parameters <* char '}'
+  optional newline
+  content <- anyChar `manyTill` try (string "{noformat}" *> optional blankline)
   return $ NoFormat params (pack content)
 
 -- | Parses a preformatted text into a @NoFormat@ element.
@@ -194,12 +198,9 @@ panel = try $ do
 -- | Parses colored text into a @'Color'@ element.
 color :: JiraParser Block
 color= try $ do
-  name <- string "{color:" *> (colorName <|> colorCode) <* char '}'
+  name <- string "{color:" *> colorName <* char '}'
   content <- block `manyTill` try (string "{color}" *> blankline)
   return $ Color (ColorName $ pack name) content
-  where
-    colorName = many letter
-    colorCode = optional (char '#') *> count 6 digit
 
 -- | Skip whitespace till we reach the next block
 skipWhitespace :: JiraParser ()

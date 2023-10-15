@@ -1,6 +1,6 @@
 {-|
 Module      : Text.Jira.Parser.Core
-Copyright   : © 2019–2020 Albert Krewinkel
+Copyright   : © 2019–2021 Albert Krewinkel
 License     : MIT
 
 Maintainer  : Albert Krewinkel <tarleb@zeitkraut.de>
@@ -19,10 +19,14 @@ module Text.Jira.Parser.Core
   , withStateFlag
   -- * String position tracking
   , updateLastStrPos
+  , updateLastSpcPos
   , notAfterString
+  , afterString
+  , afterSpace
   -- * Parsing helpers
   , endOfPara
   , notFollowedBy'
+  , many1Till
   , blankline
   , skipSpaces
   , blockNames
@@ -41,7 +45,9 @@ type JiraParser = Parsec Text ParserState
 data ParserState = ParserState
   { stateInLink      :: Bool            -- ^ whether the parser is within a link
   , stateInList      :: Bool            -- ^ whether the parser is within a list
+  , stateInMarkup    :: Bool            -- ^ whether the parser is within markup
   , stateInTable     :: Bool            -- ^ whether the parser is within a table
+  , stateLastSpcPos  :: Maybe SourcePos -- ^ most recent space char position
   , stateLastStrPos  :: Maybe SourcePos -- ^ position at which the last string
                                         --   ended
   }
@@ -51,7 +57,9 @@ defaultState :: ParserState
 defaultState = ParserState
   { stateInLink      = False
   , stateInList      = False
+  , stateInMarkup    = False
   , stateInTable     = False
+  , stateLastSpcPos  = Nothing
   , stateLastStrPos  = Nothing
   }
 
@@ -71,12 +79,35 @@ updateLastStrPos = do
   pos <- getPosition
   modifyState $ \st -> st { stateLastStrPos = Just pos }
 
--- | Checks whether the parser is directly after a string.
-notAfterString :: JiraParser Bool
-notAfterString = do
+-- | Updates the state, marking the current input position as the end of a
+-- string.
+updateLastSpcPos :: JiraParser ()
+updateLastSpcPos = do
+  pos <- getPosition
+  modifyState $ \st -> st { stateLastSpcPos = Just pos }
+
+-- | Returns @'True'@ if the current parser position is directly
+-- after a word/string. Returns @'False'@ if the parser is
+-- looking at the first character of the input.
+afterString :: JiraParser Bool
+afterString = do
   curPos <- getPosition
   prevPos <- stateLastStrPos <$> getState
-  return (Just curPos /= prevPos)
+  return (Just curPos == prevPos)
+
+-- | Returns true when the current parser position is either at
+-- the beginning of the document or if the preceding characters
+-- did not belong to a string.
+notAfterString :: JiraParser Bool
+notAfterString = not <$> afterString
+
+-- | Returns @'True'@ iff the character before the current parser
+-- position was a space.
+afterSpace :: JiraParser Bool
+afterSpace = do
+  curPos <- getPosition
+  lastSpacePos <- stateLastSpcPos <$> getState
+  return (Just curPos == lastSpacePos)
 
 -- | Parses a string with the given Jira parser.
 parseJira :: JiraParser a -> Text -> Either ParseError a
@@ -103,17 +134,30 @@ parameters = option (Nothing, []) $ do
     value    = pack <$> many1 (noneOf "\"'\n\r|{}=")
     language = key <* (pipe <|> lookAhead (char '}'))
 
+-- | Like @manyTill@, but reads at least one item.
+many1Till :: (Show end)
+          => JiraParser a
+          -> JiraParser end
+          -> JiraParser [a]
+many1Till p end = do
+  notFollowedBy' end
+  first <- p
+  rest <- manyTill p end
+  return (first:rest)
+
 -- | Succeeds if the parser is looking at the end of a paragraph.
 endOfPara :: JiraParser ()
 endOfPara = eof
   <|> lookAhead blankline
   <|> lookAhead headerStart
+  <|> lookAhead quoteStart
   <|> lookAhead horizontalRule
   <|> lookAhead listItemStart
   <|> lookAhead tableStart
   <|> lookAhead panelStart
   where
     headerStart    = void $ char 'h' *> oneOf "123456" <* char '.'
+    quoteStart     = void $ string "bq."
     listItemStart  = void $ skipSpaces *> many1 (oneOf "#*-") <* char ' '
     tableStart     = void $ skipSpaces *> many1 (char '|')
     panelStart     = void $ char '{' *> choice (map (try . string) blockNames)

@@ -1,6 +1,6 @@
 {-|
 Module      : Text.Jira.Parser.InlineTests
-Copyright   : © 2019–2020 Albert Krewinkel
+Copyright   : © 2019–2021 Albert Krewinkel
 License     : MIT
 
 Maintainer  : Albert Krewinkel <tarleb@zeitkraut.de>
@@ -135,6 +135,10 @@ tests = testGroup "Inline"
         parseJira styled "-far-fetched-" @?=
         Right (Styled Strikeout [Str "far", SpecialChar '-', Str "fetched"])
 
+      , testCase "symbol before closing char" $
+        parseJira styled "-backwards<-" @?=
+        Right (Styled Strikeout [Str "backwards<"])
+
       , testGroup "emphasis"
         [ testCase "single word" $
           parseJira styled "_single_" @?= Right (Styled Emphasis [Str "single"])
@@ -159,6 +163,9 @@ tests = testGroup "Inline"
 
         , testCase "require word boundary after closing underscore" $
           isLeft (parseJira styled "_nope_nope") @? "no boundary after closing"
+
+        , testCase "disallow newline in markup" $
+          isLeft (parseJira styled "_eol\nnext line_") @? "newline in markup"
 
         , testCase "zero with space as word boundary" $
           parseJira ((,) <$> styled <*> str) "_yup_\8203next" @?=
@@ -219,29 +226,98 @@ tests = testGroup "Inline"
         parseJira autolink "https://example.org/foo" @?=
         Right (AutoLink (URL "https://example.org/foo"))
 
+      , testCase "link followed by text" $
+        parseJira autolink "ftp://example.com/passwd has passwords" @?=
+        Right (AutoLink (URL "ftp://example.com/passwd"))
+
       , testCase "email" $
         parseJira autolink "mailto:nobody@test.invalid" @?=
         Right (AutoLink (URL "mailto:nobody@test.invalid"))
+
+      , testCase "braces cannot be in bare links" $
+        parseJira autolink "https://example.edu/{*}" @?=
+        Right (AutoLink (URL "https://example.edu/"))
+
+      , testCase "file URIs are not autolinks" $
+        isLeft (parseJira autolink "file:///etc/fstab") @? ""
+      ]
+
+    , testGroup "citation"
+      [ testCase "name" $
+        parseJira citation "??John Doe??" @?=
+        Right (Citation [Str "John", Space, Str "Doe"])
+
+      , testCase "with markup" $
+        parseJira citation "??Jane *Example* Doe??" @?=
+        Right (Citation [ Str "Jane", Space, Styled Strong [Str "Example"]
+                        , Space, Str "Doe"])
       ]
 
     , testGroup "link"
       [ testCase "unaliased link" $
         parseJira link "[https://example.org]" @?=
-        Right (Link [] (URL "https://example.org"))
+        Right (Link External [] (URL "https://example.org"))
 
       , testCase "aliased link" $
         parseJira link "[Example|https://example.org]" @?=
-        Right (Link [Str "Example"] (URL "https://example.org"))
+        Right (Link External [Str "Example"] (URL "https://example.org"))
 
       , testCase "alias with emphasis" $
         parseJira link "[_important_ example|https://example.org]" @?=
-        Right (Link [Styled Emphasis [Str "important"], Space, Str "example"]
+        Right (Link External
+               [Styled Emphasis [Str "important"], Space, Str "example"]
                 (URL "https://example.org"))
+
+      , testCase "alias with URL" $
+        parseJira link "[https://example.org website|https://example.org]" @?=
+        Right (Link External
+                [ Str "https", SpecialChar ':', Str "//example.org"
+                , Space, Str "website"]
+                (URL "https://example.org"))
+
+      , testCase "link to anchor" $
+        parseJira link "[see here|#there]" @?=
+        Right (Link External [Str "see", Space, Str "here"] (URL "#there"))
 
       , testCase "mail address" $
         parseJira link "[send mail|mailto:me@nope.invalid]" @?=
-        Right (Link [Str "send", Space, Str "mail"]
-               (URL "mailto:me@nope.invalid"))
+        Right (Link Email [Str "send", Space, Str "mail"]
+               (URL "me@nope.invalid"))
+
+      , testGroup "attachment link"
+        [ testCase "simple attachment" $
+          parseJira link "[testing^test.xml]" @?=
+          Right (Link Attachment [Str "testing"] (URL "test.xml"))
+
+        , testCase "attachment without description" $
+          parseJira link "[^results.txt]" @?=
+          Right (Link Attachment [] (URL "results.txt"))
+
+        , testCase "filename with space and unicode" $
+          parseJira link "[^Straßenbahn Berlin.jpg]" @?=
+          Right (Link Attachment [] (URL "Straßenbahn Berlin.jpg"))
+        ]
+
+      , testGroup "smart links"
+        [ testCase "smart link" $
+          parseJira link "[hslua|https://github.com/hslua/hslua|smart-link]" @?=
+          Right (Link SmartLink [Str "hslua"]
+                 (URL "https://github.com/hslua/hslua"))
+
+        , testCase "smart card" $
+          parseJira link
+            "[repo|https://github.com/tarleb/jira-wiki-markup|smart-card]" @?=
+          Right (Link SmartCard [Str "repo"]
+                 (URL "https://github.com/tarleb/jira-wiki-markup"))
+        ]
+
+      , testCase "user link" $
+        parseJira link "[testing|~account-id:something]" @?=
+        Right (Link User [Str "testing"] (URL "account-id:something"))
+
+      , testCase "user without description" $
+        parseJira link "[~username]" @?=
+        Right (Link User [] (URL "username"))
       ]
 
     , testGroup "image"
@@ -263,6 +339,11 @@ tests = testGroup "Inline"
                      , Parameter "vspace" "4"
                      ]
         in Right (Image params (URL "image.gif"))
+
+      , testCase "quoted parameter" $
+        parseJira image "!foo.jpg|alt=\"some foo!\"!" @?=
+        let params = [ Parameter "alt" "some foo!"]
+        in Right (Image params (URL "foo.jpg"))
       ]
 
     , testGroup "color"
@@ -275,8 +356,8 @@ tests = testGroup "Inline"
         Right (ColorInline (ColorName "#526487") [Str "blueish"])
 
       , testCase "hex color without hash" $
-        parseJira colorInline "{color:526487}blueish{color}" @?=
-        Right (ColorInline (ColorName "#526487") [Str "blueish"])
+        parseJira colorInline "{color:526Ab7}blueish{color}" @?=
+        Right (ColorInline (ColorName "#526Ab7") [Str "blueish"])
       ]
     ]
 
@@ -290,6 +371,10 @@ tests = testGroup "Inline"
       Right [ Str "shopping", Space, Str "at", Space
             , Str "P", Entity "amp", Str "C"
             ]
+
+    , testCase "autolink followed by pipe" $
+      parseJira (many1 inline) "https://jira.example/file.txt|" @?=
+      Right [AutoLink (URL "https://jira.example/file.txt"), SpecialChar '|']
 
     , testCase "autolink followed by pipe" $
       parseJira (many1 inline) "https://jira.example/file.txt|" @?=
@@ -317,6 +402,10 @@ tests = testGroup "Inline"
       Right [ Str "verdict", SpecialChar ':', Space
             , Emoji IconSmiling, Space, Str "funny"]
 
+    , testCase "smiley within word" $
+      parseJira (normalizeInlines <$> many1 inline) "C:DE" @?=
+      Right [ Str "C", SpecialChar ':', Str "DE" ]
+
     , testCase "dash with spaces" $
       parseJira (many1 inline) "one  -- two" @?=
       Right [Str "one", Space, Str "–", Space, Str "two"]
@@ -338,6 +427,18 @@ tests = testGroup "Inline"
       Right [ SpecialChar '-', Str "15" , Space, Str "02"
             , SpecialChar '-', Str "3"
             ]
+
+    , testCase "ascii arrows" $
+      -- the hypens used to be treated as deletion markers.
+      parseJira (many1 inline) "-> step ->" @?=
+      Right [ SpecialChar '-', Str ">" , Space, Str "step", Space
+            , SpecialChar '-', Str ">"
+            ]
+
+    , testCase "long ascii arrow" $
+      parseJira (many1 inline) "click --> done" @?=
+      Right [ Str "click", Space, SpecialChar '-', SpecialChar '-'
+            , Str ">", Space, Str "done"]
 
     ]
   ]
